@@ -4,7 +4,7 @@ import random
 def chess_bot(obs):
     game = Game(obs.board)
     moves = list(game.get_moves())
-
+    print("\n\t", moves)
     for move in moves[:10]:
         g = Game(obs.board)
         g.apply_move(move)
