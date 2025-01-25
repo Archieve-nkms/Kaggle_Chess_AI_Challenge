@@ -233,9 +233,16 @@ def init_weights_kaiming(m):
         if m.bias is not None:
             nn.init.zeros_(m.bias)
 
+times = []
+
 def chess_bot(obs, network:ValueNetwork, iteration = 10):
+    start_time = time.time()
+
     mcts = MCTS(obs.board, obs.mark, network) # FEN
-    return mcts.search(iteration)
+    move = mcts.search(iteration)
+    
+    times.append(time.time() - start_time)
+    return move
 
 total_episodes = 200000 
 buffer = []
@@ -276,9 +283,12 @@ for episode in range(1, total_episodes+1):
         env.configuration["seed"] = 12345
     else:
         env.configuration["seed"] = random.randint(0, 10000)
-    result = env.run([lambda obs: chess_bot(obs, value_network, episode), lambda obs: chess_bot(obs, value_network_2, episode)])
+    result = env.run([lambda obs: chess_bot(obs, value_network, iteration), lambda obs: chess_bot(obs, value_network_2, iteration)])
+    avg_time = sum(times) / len(times)
+    times.clear()
 
     print(f"Episode: {episode}")
+    print(f"Avg step time: {avg_time:.2f}")
     print(f"Training progression: {progress:.2f}%")
     print("Agent exit status/reward/time left: ")
     for agent in result[-1]:
