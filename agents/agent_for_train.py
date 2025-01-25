@@ -1,10 +1,13 @@
 import random
+import time
 import tensorflow as tf
 import torch
 import torch.nn as nn
 import torch.nn.functional as f
 import torch.optim as optim
 import torch.quantization
+import bisect
+
 from Chessnut import Game
 from math import sqrt, log
 from kaggle_environments import make
@@ -20,6 +23,7 @@ class ValueNetwork(nn.Module):
         self.dropout = nn.Dropout(0.3)
 
     def forward(self, x):
+        x = x.to(device)
         x = f.relu(self.conv1(x))
         x = f.relu(self.conv2(x))
         x = x.view(x.size(0), -1)  # Flatten
@@ -74,7 +78,7 @@ class MCTS:
         while node.is_fully_expanded() and not node.is_leaf():
             node = node.get_best_child()
         return node
-    
+
     def _expand(self, node):
         moves = node.untried_moves
         games = [Game(node.fen) for _ in moves]
@@ -97,12 +101,12 @@ class MCTS:
         best_move = moves[scores.argmax()]
             
         return node.expand(best_move)
-
+    
     def _simulate(self, fen):
         game = Game(fen)
 
         bitboards = board_to_bitboards(game.board)
-        input_tensor = bitboards_to_tensor(bitboards).unsqueeze(0).to(device)
+        input_tensor = bitboards_to_tensor(bitboards).unsqueeze(0)
         with torch.no_grad():
             score = self.value_network.forward(input_tensor)
         self.value_network.save_to_buffer(input_tensor, score.item())
@@ -144,7 +148,7 @@ def bitboards_to_tensor(bitboards):
 
     return tensor
 
-def train_value_network(value_network, buffer, epochs=10, batch_size=32):
+def train_value_network(value_network, buffer, epochs=25, batch_size=32):
     optimizer = optim.Adam(value_network.parameters(), lr=0.001)
     loss_fn = nn.HuberLoss()  # 손실 함수
 
@@ -187,18 +191,20 @@ def finalize_buffer(value_network, game_result):
         updated_buffer.append((state, y_hat, float(game_result)))  # y 값 추가
     value_network.buffer = updated_buffer
 
-def chess_bot(obs, network:ValueNetwork):
-    mcts = MCTS(obs.board, obs.mark, network) # FEN
-    return mcts.search(50)
+def init_weights_kaiming(m):
+    if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
+        nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
 
-def save_model(value_network, path="value_network.pth"):
-    """
-    모델의 state_dict를 저장.
-    """
-    torch.save(value_network.state_dict(), path)
+def save_model(value_network, path="value_network.pth", episode=0):
+    torch.save({
+        "episode": episode,
+        "model_state_dict": value_network.state_dict(),
+    }, path)
     print(f"Model saved to {path}")
 
-def apply_quantization(value_network, path="quantized_value_network.pth"):
+def apply_quantization(value_network, path="quantized_value_network.pth", episode=0):
     # 모델을 평가 모드로 전환
     value_network.eval()
 
@@ -210,16 +216,171 @@ def apply_quantization(value_network, path="quantized_value_network.pth"):
     )
 
     # 양자화된 모델 저장
-    torch.save(quantized_model.state_dict(), path)
+    torch.save({
+        "episode": episode,
+        "model_state_dict": quantized_model.state_dict(),
+    }, path)
     print(f"Quantized model saved to {path}")
 
     return quantized_model
 
-def init_weights_kaiming(m):
-    if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
-        nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
-        if m.bias is not None:
-            nn.init.zeros_(m.bias)
+def load_model(value_network, path="value_network.pth"):
+    checkpoint = torch.load(path)
+    value_network.load_state_dict(checkpoint["model_state_dict"])
+    starting_episode = checkpoint.get("episode", 0)  # 저장된 에피소드 번호
+    print(f"Model loaded from {path}, starting at episode {starting_episode}")
+    return starting_episode
+
+def load_quantized_model(value_network_class, path="quantized_value_network.pth"):
+    checkpoint = torch.load(path)
+    quantized_model = torch.quantization.quantize_dynamic(
+        value_network_class(),  # 원래 클래스 생성
+        {torch.nn.Linear},
+        dtype=torch.qint8
+    )
+    quantized_model.load_state_dict(checkpoint["model_state_dict"])
+    print(f"Quantized model loaded from {path}, starting at episode {checkpoint.get('episode', 0)}")
+    return quantized_model, checkpoint.get("episode", 0)
+
+def chess_bot(obs, network:ValueNetwork, iteration):
+    mcts = MCTS(obs.board, obs.mark, network)
+    return mcts.search(iteration)
+
+def chess_bot2(obs):
+    game = Game(obs.board)
+    moves = list(game.get_moves())
+    for move in moves[:10]:
+        g = Game(obs.board)
+        g.apply_move(move)
+        if g.status == Game.CHECKMATE:
+            return move
+        
+    for move in moves:
+        if game.board.get_piece(Game.xy2i(move[2:4])) != ' ':
+            return move
+            
+    for move in moves:
+        if "q" in move.lower():
+            return move
+            
+    return random.choice(moves)
+
+def self_play():
+    env = make("chess", debug=True)
+    episodes = 10000
+    value_network = ValueNetwork().to(device)
+    value_network.apply(init_weights_kaiming)
+
+    value_network_2 = ValueNetwork().to(device)
+    value_network_2.apply(init_weights_kaiming)
+
+    buffer = []
+    game_history = [0, 0, 0] 
+    for episode in range(1, episodes+1):
+        if episode % 100 == 0:  # 매 100 에피소드마다 고정된 시드로 실행
+            env.configuration["seed"] = 12345
+        else:
+            env.configuration["seed"] = random.randint(0, 10000)
+
+        iteration = 10
+        epoch = 25
+        if(500 < episode and episode <= 2000):
+            epoch = 15
+            iteration = 50 
+        if(2000 < episode):
+            epoch = 10
+            iteration = 100
+        print(f"\nEpisode: {episode}")
+        result = env.run([lambda obs: chess_bot(obs, value_network, iteration), lambda obs: chess_bot(obs, value_network_2, iteration)])
+
+        print("Agent exit status/reward/time left: ")
+        for agent in result[-1]:
+            print("\t", agent.status, "/", agent.reward, "/", agent.observation.remainingOverageTime)
+
+        reward = 0
+        if result[-1][1].reward == None or result[-1][1].reward == 0.5:
+            reward = reward_2 = 0
+            game_history[1] += 1
+        elif result[-1][1].reward == 0:
+            reward = 1
+            game_history[0] += 1
+        elif result[-1][1].reward == 1:
+            reward = -1
+            game_history[2] += 1
+
+        print(f"{game_history[0]} wins {game_history[1]} draws {game_history[2]} losses")
+
+        finalize_buffer(value_network, reward)
+        finalize_buffer(value_network_2, reward * -1)
+        buffer.extend(value_network.buffer) 
+        buffer.extend(value_network_2.buffer)
+        value_network.buffer.clear()
+        value_network_2.buffer.clear()
+
+        if episode > 0 and episode % 10 == 0:  # 매 10 에피소드마다 학습
+            print(f"Training on buffer at Episode {episode}")
+            train_value_network(value_network, buffer, epoch)
+            value_network_2.load_state_dict(value_network.state_dict())
+            buffer.clear()
+        if episode > 0 and episode % 100 == 0:  # 매 100 에피소드마다 모델 저장
+            save_model(value_network, path=f"models/value_network_episode_{episode}.pth", episode=episode)
+            apply_quantization(value_network, path=f"models/q_value_network_episode_{episode}.pth", episode=episode)
+            env.render(mode='ipython', width=600, height=600)
+
+def against_other_bot():
+    env = make("chess", debug=True)
+    episodes = 10000
+    value_network = ValueNetwork().to(device)
+    value_network.apply(init_weights_kaiming)
+
+    buffer = []
+    game_history = [0, 0, 0] 
+    for episode in range(1, episodes+1):
+        if episode % 100 == 0:  # 매 100 에피소드마다 고정된 시드로 실행
+            env.configuration["seed"] = 12345
+        else:
+            env.configuration["seed"] = random.randint(0, 10000)
+
+        iteration = 10
+        epoch = 25
+        if(500 < episode and episode <= 2000):
+            epoch = 15
+            iteration = 50 
+        if(2000 < episode):
+            epoch = 10
+            iteration = 100
+        print(f"\nEpisode: {episode}")
+        result = env.run([lambda obs: chess_bot(obs, value_network, iteration), lambda obs: chess_bot2(obs)])
+
+        print("Agent exit status/reward/time left: ")
+        for agent in result[-1]:
+            print("\t", agent.status, "/", agent.reward, "/", agent.observation.remainingOverageTime)
+
+        reward = 0
+        if result[-1][1].reward == None or result[-1][1].reward == 0.5:
+            reward = reward_2 = 0
+            game_history[1] += 1
+        elif result[-1][1].reward == 0:
+            reward = 1
+            game_history[0] += 1
+        elif result[-1][1].reward == 1:
+            reward = -1
+            game_history[2] += 1
+
+        print(f"{game_history[0]} wins {game_history[1]} draws {game_history[2]} losses")
+
+        finalize_buffer(value_network, reward)
+        buffer.extend(value_network.buffer) 
+        value_network.buffer.clear()
+
+        if episode > 0 and episode % 10 == 0:  # 매 10 에피소드마다 학습
+            print(f"Training on buffer at Episode {episode}")
+            train_value_network(value_network, buffer, epoch)
+            buffer.clear()
+        if episode > 0 and episode % 100 == 0:  # 매 100 에피소드마다 모델 저장
+            save_model(value_network, path=f"models/value_network_episode_{episode}.pth", episode=episode)
+            apply_quantization(value_network, path=f"models/q_value_network_episode_{episode}.pth", episode=episode)
+            env.render(mode='ipython', width=600, height=600)
 
 print(tf.__version__)
 if torch.cuda.is_available():
@@ -232,10 +393,8 @@ env = make("chess", debug=True)
 episodes = 10000
 value_network = ValueNetwork().to(device)
 value_network.apply(init_weights_kaiming)
-
 value_network_2 = ValueNetwork().to(device)
 value_network_2.apply(init_weights_kaiming)
-
 buffer = []
 game_history = [0, 0, 0] 
 
@@ -244,12 +403,20 @@ for episode in range(1, episodes+1):
         env.configuration["seed"] = 12345
     else:
         env.configuration["seed"] = random.randint(0, 10000)
-    result = env.run([lambda obs: chess_bot(obs, value_network), lambda obs: chess_bot(obs, value_network_2)])
+    iteration = 10
+    epoch = 25
+    if(500 < episode and episode <= 2000):
+        epoch = 15
+        iteration = 20
+    if(2000 < episode):
+        epoch = 10
+        iteration = 30
 
+    print(f"\nEpisode: {episode}")
+    result = env.run([lambda obs: chess_bot(obs, value_network, iteration), lambda obs: chess_bot(obs, value_network_2, iteration)])
     print("Agent exit status/reward/time left: ")
     for agent in result[-1]:
         print("\t", agent.status, "/", agent.reward, "/", agent.observation.remainingOverageTime)
-
     reward = 0
     if result[-1][1].reward == None or result[-1][1].reward == 0.5:
         reward = reward_2 = 0
@@ -260,8 +427,6 @@ for episode in range(1, episodes+1):
     elif result[-1][1].reward == 1:
         reward = -1
         game_history[2] += 1
-
-    print(f"Episode: {episode}")
     print(f"{game_history[0]} wins {game_history[1]} draws {game_history[2]} losses")
     finalize_buffer(value_network, reward)
     finalize_buffer(value_network_2, reward * -1)
@@ -269,12 +434,12 @@ for episode in range(1, episodes+1):
     buffer.extend(value_network_2.buffer)
     value_network.buffer.clear()
     value_network_2.buffer.clear()
-
+    env.render(mode='ipython', width=600, height=600)
     if episode > 0 and episode % 10 == 0:  # 매 10 에피소드마다 학습
         print(f"Training on buffer at Episode {episode}")
-        train_value_network(value_network, buffer)
+        train_value_network(value_network, buffer, epoch)
         value_network_2.load_state_dict(value_network.state_dict())
         buffer.clear()
     if episode > 0 and episode % 100 == 0:  # 매 100 에피소드마다 모델 저장
-        apply_quantization(value_network, path=f"models/value_network_episode_{episode}.pth")
-        env.render(mode='ipython', width=600, height=600)
+        save_model(value_network, path=f"models/value_network_episode_{episode}.pth", episode=episode)
+        apply_quantization(value_network, path=f"models/q_value_network_episode_{episode}.pth", episode=episode)
