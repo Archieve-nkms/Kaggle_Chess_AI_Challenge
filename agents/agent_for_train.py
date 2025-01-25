@@ -1,4 +1,5 @@
 import random
+import os
 import tensorflow as tf
 import torch
 import torch.nn as nn
@@ -15,10 +16,10 @@ class ValueNetwork(nn.Module):
     def __init__(self):
         super(ValueNetwork, self).__init__()
         self.buffer = []  # 게임이 종료되기 전까지 state와 y_hat을 보관할 버퍼
-        self.conv1 = nn.Conv2d(12, 16, kernel_size=3, padding=1)
+        self.conv1 = nn.Conv2d(19, 16, kernel_size=3, padding=1)
         self.conv2 = nn.Conv2d(16, 16, kernel_size=3, padding=1)
-        self.fc1 = nn.Linear(16 * 8 * 8, 32)
-        self.fc2 = nn.Linear(32, 1)
+        self.fc1 = nn.Linear(16 * 8 * 8, 16)
+        self.fc2 = nn.Linear(16, 1)
         self.dropout = nn.Dropout(0.3)
 
     def forward(self, x):
@@ -70,9 +71,8 @@ class Node:
         self.wins += result
 
 class MCTS:
-    def __init__(self, fen, player, value_network):
-        self.root = Node(fen, None)
-        self.player = player
+    def __init__(self, value_network):
+        self.root = None
         self.value_network = value_network
 
     def _select(self, node):
@@ -85,19 +85,17 @@ class MCTS:
         return node.expand(move)
 
     def _simulate(self, fen):
-        game = Game(fen)
-
-        bitboards = board_to_bitboards(game.board)
-        input_tensor = bitboards_to_tensor(bitboards).unsqueeze(0)
+        input_tensor = Create_input_tensor(Game(fen))
         with torch.no_grad():
-            return self.value_network(input_tensor).item()
+            return self.value_network.forward(input_tensor).item()
 
     def _backpropagate(self, node, result):
         while node is not None:
             node.update(result)
             node = node.parent
 
-    def search(self, iterations):
+    def search(self, iterations, fen):
+        self.root = Node(fen, None)
         for _ in range(iterations):
             # Selection
             node = self._select(self.root)
@@ -113,15 +111,35 @@ class MCTS:
             self._backpropagate(node, result)
 
         best_node = self.root.get_best_child(exploration_weight=0)
-
-        bitboards = board_to_bitboards(Game(best_node.fen).board)
-        input_tensor = bitboards_to_tensor(bitboards).unsqueeze(0)
+        input_tensor = Create_input_tensor(Game(best_node.fen))
         with torch.no_grad():
             score = self.value_network.forward(input_tensor).item()
         self.value_network.save_to_buffer(input_tensor, score)
 
         return best_node.move
     
+def Create_input_tensor(game: Game):
+    bitboards = board_to_bitboards(game.board)
+    input_tensor = bitboards_to_tensor(bitboards).unsqueeze(0)  # (12, 8, 8) -> (1, 12, 8, 8)
+    
+    _, _, castling_fen, en_passant_fen = game.get_fen().split()[:4]
+
+    player_turn = torch.tensor([[[[1] * 8] * 8]]) if game.state.player == 'b' else torch.tensor([[[[0] * 8] * 8]])  # (1, 1, 8, 8)
+    en_passant = torch.tensor([[[[1] * 8] * 8]]) if en_passant_fen != '-' else torch.tensor([[[[0] * 8] * 8]])  # (1, 1, 8, 8)
+    move_count = torch.full((1, 1, 8, 8), game.state.ply / 50.0, dtype=torch.float32)  # 정규화된 move count
+    castling = torch.tensor([
+        [[[1] * 8] * 8] if 'K' in castling_fen else [[[0] * 8] * 8],  # 백 킹사이드
+        [[[1] * 8] * 8] if 'Q' in castling_fen else [[[0] * 8] * 8],  # 백 퀸사이드
+        [[[1] * 8] * 8] if 'k' in castling_fen else [[[0] * 8] * 8],  # 흑 킹사이드
+        [[[1] * 8] * 8] if 'q' in castling_fen else [[[0] * 8] * 8],  # 흑 퀸사이드
+    ], dtype=torch.float32)  # (4, 1, 8, 8)
+
+    special_rules = torch.cat((player_turn, en_passant, move_count, castling), dim=0).squeeze(1)  # (7, 8, 8)
+    
+    input_tensor = torch.cat((input_tensor.squeeze(0), special_rules), dim=0)  # (12 + 7, 8, 8)
+
+    return input_tensor.unsqueeze(0)  # 배치 차원 추가 (1, 19, 8, 8)
+
 def board_to_bitboards(game_board):
     position = game_board._position
     bitboards = {piece: 0 for piece in "PNBRQKpnbrqk"}
@@ -142,8 +160,8 @@ def bitboards_to_tensor(bitboards):
 
     return tensor
 
-def train_value_network(value_network, buffer, epochs=25, batch_size=32):
-    optimizer = optim.Adam(value_network.parameters(), lr=0.001)
+def train_value_network(value_network, buffer, learning_rate, epochs=25, batch_size=32):
+    optimizer = optim.Adam(value_network.parameters(), lr=learning_rate)
     loss_fn = nn.HuberLoss()  # 손실 함수
 
     for epoch in range(epochs):
@@ -155,9 +173,9 @@ def train_value_network(value_network, buffer, epochs=25, batch_size=32):
             batch = buffer[i:i + batch_size]
 
             # 상태 텐서 준비
-            inputs = torch.stack([item[0] for item in batch]).to(device)  # [batch_size, 12, 8, 8]
+            inputs = torch.stack([item[0] for item in batch]).to(device)  # [batch_size, 19, 8, 8]
             if len(inputs.shape) == 5:  # 5D로 들어올 경우
-                inputs = inputs.squeeze(1)  # [batch_size, 12, 8, 8]
+                inputs = inputs.squeeze(1)  # [batch_size, 19, 8, 8]
 
             # 라벨 준비
             targets = torch.tensor([item[2] for item in batch]).to(device)  # [batch_size]
@@ -173,6 +191,7 @@ def train_value_network(value_network, buffer, epochs=25, batch_size=32):
             epoch_loss += loss.item()
             num_batches += 1
 
+        # log
         avg_loss = epoch_loss / num_batches
         print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}")
 
@@ -233,67 +252,79 @@ def init_weights_kaiming(m):
         if m.bias is not None:
             nn.init.zeros_(m.bias)
 
-times = []
-
-def chess_bot(obs, network:ValueNetwork, iteration = 10):
+def chess_bot(obs, mcts:MCTS, iteration = 10):
     start_time = time.time()
 
-    mcts = MCTS(obs.board, obs.mark, network) # FEN
-    move = mcts.search(iteration)
+    move = mcts.search(iteration, obs.board)
     
     times.append(time.time() - start_time)
     return move
 
-total_episodes = 200000 
-buffer = []
-game_history = [0, 0, 0] 
-iteration = 10
-epochs = 10
-learning_interval = 50
+def add_snapshot():
+    #TODO
+    pass
 
-print(tf.__version__)
+
+
+
+# RL
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+value_network = ValueNetwork().to(device)
+value_network.apply(init_weights_kaiming)
+mcts = MCTS(value_network)
+buffer = []
+buffer_threshold = 4096
+model_save_interval = 1000
+
+# Parameters
+total_episodes = 200000 
+iteration = 10
+epochs = 15
+learning_rate = 0.2
+
+# Snapshot
+snapshots = []
+snapshot_index = 0
+snapshot_window = 4
+snapshot_replace_interval = 1000
+
+# Logs
+game_history = [0, 0, 0] 
+times = []
+
+print(f"Tensorflow {tf.__version__}")
+print(f"Current Dir: {os.getcwd()}")
 if torch.cuda.is_available():
     print("GPU is available!")
 else:
     print("GPU is not available.")
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 env = make("chess", debug=True)
-
-value_network = ValueNetwork().to(device)
-value_network.apply(init_weights_kaiming)
-
-value_network_2 = ValueNetwork().to(device)
-value_network_2.apply(init_weights_kaiming)
-
 for episode in range(1, total_episodes+1):
-    print("\n")
+    print(f"\nEpisode: {episode}")
     progress = episode / total_episodes
-    
     if 0.2 < progress and progress <= 0.8:
         iteration = 30
-        epochs = 25
-        learning_interval = 200
+        epochs = 30
+        learning_rate = 0.02
     elif 0.8 < progress: 
         iteration = 100
-        epochs = 15
-        learning_interval = 500
+        epochs = 20
+        learning_rate = 0.002
 
-    if episode % 100 == 0:  # 매 100 에피소드마다 고정된 시드로 실행
-        env.configuration["seed"] = 12345
-    else:
-        env.configuration["seed"] = random.randint(0, 10000)
-    result = env.run([lambda obs: chess_bot(obs, value_network, iteration), lambda obs: chess_bot(obs, value_network_2, iteration)])
+    env.configuration["seed"] = random.randint(0, 10000)
+    result = env.run([lambda obs: chess_bot(obs, mcts, iteration), lambda obs: chess_bot(obs, snapshots[snapshot_index], iteration)])
+
     avg_time = sum(times) / len(times)
     times.clear()
 
-    print(f"Episode: {episode}")
+    # Log
     print(f"Avg step time: {avg_time:.2f}")
-    print(f"Training progression: {progress:.2f}%")
     print("Agent exit status/reward/time left: ")
     for agent in result[-1]:
         print("\t", agent.status, "/", agent.reward, "/", agent.observation.remainingOverageTime)
 
+    # Reward
     reward = 0
     if result[-1][1].reward == None or result[-1][1].reward == 0.5:
         reward = reward_2 = 0
@@ -304,22 +335,28 @@ for episode in range(1, total_episodes+1):
     elif result[-1][1].reward == 1:
         reward = -1
         game_history[2] += 1
-
     print(f"{game_history[0]} wins {game_history[1]} draws {game_history[2]} losses")
+    
+    # Handle buffer
     finalize_buffer(value_network, reward)
-    finalize_buffer(value_network_2, reward * -1)
     buffer.extend(value_network.buffer) 
-    buffer.extend(value_network_2.buffer)
     value_network.buffer.clear()
-    value_network_2.buffer.clear()
 
-    if episode > 0 and episode % learning_interval == 0:
+    if len(buffer) >= buffer_threshold:
         print(f"\nTraining on buffer at Episode {episode}")
-        print(f"Buffer size: {len(buffer)}")
-        train_value_network(value_network, buffer, epochs)
-        value_network_2.load_state_dict(value_network.state_dict())
+        train_value_network(value_network, buffer, learning_rate, epochs)
         buffer.clear()
-    if episode > 0 and episode % 1000 == 0: 
+        env.render(mode='ipython', width=600, height=600)
+    if episode > 0 and episode % model_save_interval == 0: 
         save_model(value_network, path=f"models/value_network_episode_{episode}.pth", episode=episode)
         apply_quantization(value_network, path=f"models/q_value_network_episode_{episode}.pth", episode=episode)
-        env.render(mode='ipython', width=600, height=600)
+    """
+       if episode > 0 and episode % snapshot_replace_interval == 0:
+        new_snapshot = ValueNetwork()
+        new_snapshot.load_state_dict(value_network.state_dict())
+        if(len(snapshots) < snapshot_window):
+            snapshots.append(value_network)
+        else:
+            snapshots[snapshot_index] = value_network
+        snapshot_index = (snapshot_index + 1) % min(len(snapshots), snapshot_window)     
+    """
