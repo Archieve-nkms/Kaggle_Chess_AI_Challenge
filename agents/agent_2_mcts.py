@@ -2,8 +2,9 @@ from Chessnut import Game
 from math import sqrt, log
 
 def chess_bot(obs):
+
     mcts = MCTS(obs.board, obs.mark) # FEN
-    return mcts.search(20)
+    return mcts.search(10)
 
 class Node:
     def __init__(self, fen, move, parent=None):
@@ -11,7 +12,7 @@ class Node:
         self.fen = fen
         self.parent = parent
         self.move = move
-        self.visits = 0
+        self.visits = 1
         self.wins = 0
         self.children = []
         self.untried_moves = list(game.get_moves())
@@ -83,7 +84,6 @@ class MCTS:
                 node = self._expand(node)
             result = self._simulate(node.fen)
             self._backpropagate(node, result)
-        print("\n")
         return self.root.get_best_child().move
 
 class ChessEvaluator:
