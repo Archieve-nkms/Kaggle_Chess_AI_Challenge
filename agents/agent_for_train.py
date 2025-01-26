@@ -1,22 +1,18 @@
 import random
-import tensorflow as tf
 import torch
 import torch.nn as nn
 import torch.nn.functional as f
 import torch.optim as optim
 import torch.quantization
-import time
 
 from Chessnut import Game
 from kaggle_environments import make
-from typing import List
 from math import sqrt, log
-
 
 class ValueNetwork(nn.Module):
     def __init__(self):
         super(ValueNetwork, self).__init__()
-        self.buffer = []  # 게임이 종료되기 전까지 state와 y_hat을 보관할 버퍼
+        self.buffer = []
         self.conv1 = nn.Conv2d(19, 16, kernel_size=3, padding=1)
         self.conv2 = nn.Conv2d(16, 16, kernel_size=3, padding=1)
         self.fc1 = nn.Linear(16 * 8 * 8, 16)
@@ -72,25 +68,28 @@ class Node:
         self.wins += result
 
 class MCTS:
-    def __init__(self, value_network, is_opponent = False):
+    def __init__(self, value_network, is_opponent = False, exploration_weight = 2):
         self.root = None
         self.value_network = value_network
         self.is_opponent = is_opponent
+        self.exploration_weight = exploration_weight
 
     def _select(self, node):
         while node.is_fully_expanded() and not node.is_leaf():
-            node = node.get_best_child()
+            node = node.get_best_child(exploration_weight = self.exploration_weight)
         return node
 
     def _expand(self, node):
-        move = node.untried_moves.pop()
+        move = random.choice(node.untried_moves)
+        node.untried_moves.remove(move)
         return node.expand(move)
 
     def _simulate(self, fen):
-        input_tensor = Create_input_tensor(Game(fen))
         with torch.no_grad():
-            return self.value_network.forward(input_tensor).item()
-
+            input_tensor = Create_input_tensor(Game(fen))
+            value = self.value_network.forward(input_tensor).item()
+        return value
+        
     def _backpropagate(self, node, result):
         while node is not None:
             node.update(result)
@@ -196,7 +195,9 @@ def finalize_buffer(value_network, game_result):
         updated_buffer.append((state, y_hat, float(game_result)))  # y 값 추가
     value_network.buffer = updated_buffer
 
-def train_value_network(value_network, buffer, learning_rate, epochs=25, batch_size=32):
+def train_value_network(value_network:ValueNetwork, buffer, learning_rate, epochs=25, batch_size=32):
+    value_network.train() 
+
     optimizer = optim.Adam(value_network.parameters(), lr=learning_rate)
     loss_fn = nn.HuberLoss()  # 손실 함수
 
@@ -208,18 +209,17 @@ def train_value_network(value_network, buffer, learning_rate, epochs=25, batch_s
         for i in range(0, len(buffer), batch_size):
             batch = buffer[i:i + batch_size]
 
-            # 상태 텐서 준비
             inputs = torch.stack([item[0] for item in batch]).to(device)  # [batch_size, 19, 8, 8]
-            if len(inputs.shape) == 5:  # 5D로 들어올 경우
+            if len(inputs.shape) == 5:
                 inputs = inputs.squeeze(1)  # [batch_size, 19, 8, 8]
 
             # 라벨 준비
-            targets = torch.tensor([item[2] for item in batch]).to(device)  # [batch_size]
+            targets = torch.tensor([item[2] for item in batch]).to(device) 
 
             # 학습 단계
             optimizer.zero_grad()
             outputs = value_network(inputs)
-            loss = loss_fn(outputs.squeeze(), targets)  # 손실 계산
+            loss = loss_fn(outputs.squeeze(), targets)
             loss.backward()
             optimizer.step()
 
@@ -230,6 +230,8 @@ def train_value_network(value_network, buffer, learning_rate, epochs=25, batch_s
         # log
         avg_loss = epoch_loss / num_batches
         print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}")
+
+        value_network.eval()
 
 def save_model(value_network, path="value_network.pth", episode=0):
     torch.save({
@@ -281,7 +283,7 @@ def init_weights_kaiming(m):
         if m.bias is not None:
             nn.init.zeros_(m.bias)
 
-def chess_bot(obs, mcts:MCTS, iteration = 10):
+def chess_bot(obs, mcts:MCTS, iteration = 15):
     move = mcts.search(iteration, obs.board)
     return move
 
@@ -289,23 +291,23 @@ def chess_bot(obs, mcts:MCTS, iteration = 10):
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 value_network = ValueNetwork().to(device)
 value_network.apply(init_weights_kaiming)
-mcts = MCTS(value_network)
+mcts = MCTS(value_network, exploration_weight=2)
 buffer = []
-buffer_threshold = 4096
+buffer_threshold = 2048
 save_interval = 1000
 
 # Parameters
-total_episodes = 200000 
-iteration = 10
+total_episodes = 200000
+iteration = 15
 epochs = 15
-learning_rate = 0.2
+learning_rate = 0.001
 
 # Logs
 game_history = [0, 0, 0]
 
 snapshotManager = SnapshotManager(window=5, add_interval=100, replace_interval=500)
 snapshotManager.addSnapshot(value_network)
-mcts_opponent = MCTS(snapshotManager.select(), is_opponent=True)
+mcts_opponent = MCTS(snapshotManager.select(), is_opponent=True, exploration_weight=2)
 
 env = make("chess", debug=True)
 for episode in range(1, total_episodes+1):
@@ -314,11 +316,10 @@ for episode in range(1, total_episodes+1):
     if 0.2 < progress and progress <= 0.8:
         iteration = 30
         epochs = 30
-        learning_rate = 0.02
+        mcts.exploration_weight = mcts_opponent.exploration_weight = 1.41421356237
     elif 0.8 < progress: 
-        iteration = 100
+        iteration = 50
         epochs = 20
-        learning_rate = 0.002
 
     env.configuration["seed"] = random.randint(0, 10000)
     result = env.run([lambda obs: chess_bot(obs, mcts, iteration), lambda obs: chess_bot(obs, mcts_opponent, iteration)])
@@ -355,9 +356,11 @@ for episode in range(1, total_episodes+1):
 
     if episode % snapshotManager.add_interval == 0:
         snapshotManager.addSnapshot(value_network)
+        print("Snapshot generated")
 
     if episode % snapshotManager.replace_interval == 0:
         mcts_opponent.value_network = snapshotManager.select()
+        print(f"Snapshot selected")
 
     if episode % save_interval == 0:
         save_model(value_network, path=f"models/value_network_episode_{episode}.pth", episode=episode)
