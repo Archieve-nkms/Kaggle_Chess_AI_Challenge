@@ -242,21 +242,12 @@ def save_model(value_network, path="value_network.pth", episode=0):
     }, path)
     print(f"Model saved to {path}")
 
-def apply_quantization(value_network, path="quantized_value_network.pth", episode=0):
-    value_network.eval()
-
+def apply_dynamic_quantization(model):
     quantized_model = torch.quantization.quantize_dynamic(
-        value_network,  # 모델
-        {torch.nn.Linear},  # 양자화를 적용할 레이어 (Linear에만 적용)
-        dtype=torch.qint8  # INT8 사용
+        model,
+        {nn.Linear}, 
+        dtype=torch.qint8
     )
-
-    torch.save({
-        "episode": episode,
-        "model_state_dict": quantized_model.state_dict(),
-    }, path)
-    print(f"Quantized model saved to {path}")
-
     return quantized_model
 
 def load_model(value_network, path="value_network.pth"):
@@ -267,18 +258,6 @@ def load_model(value_network, path="value_network.pth"):
 
     return starting_episode
 
-def load_quantized_model(value_network_class, path="quantized_value_network.pth"):
-    checkpoint = torch.load(path)
-    quantized_model = torch.quantization.quantize_dynamic(
-        value_network_class(),
-        {torch.nn.Linear},
-        dtype=torch.qint8
-    )
-    quantized_model.load_state_dict(checkpoint["model_state_dict"])
-    print(f"Quantized model loaded from {path}, starting at episode {checkpoint.get('episode', 0)}")
-
-    return quantized_model, checkpoint.get("episode", 0)
-    
 def init_weights_kaiming(m):
     if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
         nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
@@ -296,7 +275,7 @@ value_network.apply(init_weights_kaiming)
 mcts = MCTS(value_network, exploration_weight=2)
 buffer = []
 buffer_threshold = 4096
-save_interval = 1000
+save_interval = 5
 
 # Parameters
 total_episodes = 200000
@@ -367,4 +346,5 @@ for episode in range(1, total_episodes+1):
 
     if episode % save_interval == 0:
         save_model(value_network, path=f"models/value_network_episode_{episode}.pth", episode=episode)
-        apply_quantization(value_network, path=f"models/q_value_network_episode_{episode}.pth", episode=episode)
+        quantized_model = apply_dynamic_quantization(value_network)
+        torch.save(quantized_model.state_dict(), f"models/q_value_network_episode_{episode}.pth")
