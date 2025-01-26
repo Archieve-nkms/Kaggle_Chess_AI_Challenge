@@ -41,6 +41,7 @@ class Node:
         self.wins = 0
         self.children = []
         self.untried_moves = list(game.get_moves())
+        self.win_prop = None
 
     def is_fully_expanded(self):
         return len(self.untried_moves) == 0
@@ -53,7 +54,7 @@ class Node:
 
         return max(
             self.children,
-            key=lambda child: child.wins / child.visits + exploration_weight * sqrt(parent_visits_log / child.visits)
+            key=lambda child: child.wins / child.visits + exploration_weight * child.win_prop * sqrt(parent_visits_log / child.visits)
         )
 
     def expand(self, move):
@@ -107,6 +108,7 @@ class MCTS:
 
             # Simulation
             result = self._simulate(node.fen)
+            node.win_prop = result
 
             # Backpropagation
             self._backpropagate(node, result)
@@ -293,13 +295,13 @@ value_network = ValueNetwork().to(device)
 value_network.apply(init_weights_kaiming)
 mcts = MCTS(value_network, exploration_weight=2)
 buffer = []
-buffer_threshold = 2048
+buffer_threshold = 4096
 save_interval = 1000
 
 # Parameters
 total_episodes = 200000
 iteration = 15
-epochs = 15
+epochs = 10
 learning_rate = 0.001
 
 # Logs
@@ -352,6 +354,7 @@ for episode in range(1, total_episodes+1):
         print(f"\nTraining on buffer at Episode {episode}")
         train_value_network(value_network, buffer, learning_rate, epochs)
         buffer.clear()
+        game_history = [0, 0, 0]
         env.render(mode='ipython', width=600, height=600)
 
     if episode % snapshotManager.add_interval == 0:
