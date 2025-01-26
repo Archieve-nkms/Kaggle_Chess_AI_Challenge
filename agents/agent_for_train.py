@@ -1,5 +1,4 @@
 import random
-import os
 import tensorflow as tf
 import torch
 import torch.nn as nn
@@ -9,8 +8,10 @@ import torch.quantization
 import time
 
 from Chessnut import Game
-from math import sqrt, log
 from kaggle_environments import make
+from typing import List
+from math import sqrt, log
+
 
 class ValueNetwork(nn.Module):
     def __init__(self):
@@ -71,9 +72,10 @@ class Node:
         self.wins += result
 
 class MCTS:
-    def __init__(self, value_network):
+    def __init__(self, value_network, is_opponent = False):
         self.root = None
         self.value_network = value_network
+        self.is_opponent = is_opponent
 
     def _select(self, node):
         while node.is_fully_expanded() and not node.is_leaf():
@@ -111,13 +113,40 @@ class MCTS:
             self._backpropagate(node, result)
 
         best_node = self.root.get_best_child(exploration_weight=0)
-        input_tensor = Create_input_tensor(Game(best_node.fen))
-        with torch.no_grad():
-            score = self.value_network.forward(input_tensor).item()
-        self.value_network.save_to_buffer(input_tensor, score)
+
+        if(not self.is_opponent):
+            input_tensor = Create_input_tensor(Game(best_node.fen))
+            with torch.no_grad():
+                score = self.value_network.forward(input_tensor).item()
+            self.value_network.save_to_buffer(input_tensor, score)
 
         return best_node.move
-    
+
+class SnapshotManager:
+    def __init__(self, window: int = 4, add_interval: int = 100, replace_interval: int = 500):
+        self.window = window
+        self.snapshots = []
+        self.oldest_index = -1
+        self.replace_interval = replace_interval
+        self.add_interval = add_interval
+
+    def addSnapshot(self, value_network: ValueNetwork):
+        if len(self.snapshots) < self.window:
+            new_snapshot = type(value_network)().to(device)
+            new_snapshot.load_state_dict(value_network.state_dict())
+            self.snapshots.append(new_snapshot)
+        else:
+            self.snapshots[self.oldest_index].load_state_dict(value_network.state_dict())
+        self.oldest_index = (self.oldest_index + 1) % self.window
+
+    def select(self) -> ValueNetwork:
+        if not self.snapshots:
+            raise ValueError("No snapshots available for selection.")
+
+        weights = [i + 1 for i in range(len(self.snapshots))]
+        selected_index = random.choices(range(len(self.snapshots)), weights=weights, k=1)[0]
+        return self.snapshots[selected_index]
+
 def Create_input_tensor(game: Game):
     bitboards = board_to_bitboards(game.board)
     input_tensor = bitboards_to_tensor(bitboards).unsqueeze(0)  # (12, 8, 8) -> (1, 12, 8, 8)
@@ -160,6 +189,13 @@ def bitboards_to_tensor(bitboards):
 
     return tensor
 
+def finalize_buffer(value_network, game_result):
+    updated_buffer = []
+
+    for state, y_hat in value_network.buffer:
+        updated_buffer.append((state, y_hat, float(game_result)))  # y 값 추가
+    value_network.buffer = updated_buffer
+
 def train_value_network(value_network, buffer, learning_rate, epochs=25, batch_size=32):
     optimizer = optim.Adam(value_network.parameters(), lr=learning_rate)
     loss_fn = nn.HuberLoss()  # 손실 함수
@@ -194,13 +230,6 @@ def train_value_network(value_network, buffer, learning_rate, epochs=25, batch_s
         # log
         avg_loss = epoch_loss / num_batches
         print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}")
-
-def finalize_buffer(value_network, game_result):
-    updated_buffer = []
-
-    for state, y_hat in value_network.buffer:
-        updated_buffer.append((state, y_hat, float(game_result)))  # y 값 추가
-    value_network.buffer = updated_buffer
 
 def save_model(value_network, path="value_network.pth", episode=0):
     torch.save({
@@ -245,7 +274,7 @@ def load_quantized_model(value_network_class, path="quantized_value_network.pth"
     print(f"Quantized model loaded from {path}, starting at episode {checkpoint.get('episode', 0)}")
 
     return quantized_model, checkpoint.get("episode", 0)
-
+    
 def init_weights_kaiming(m):
     if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
         nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
@@ -253,19 +282,8 @@ def init_weights_kaiming(m):
             nn.init.zeros_(m.bias)
 
 def chess_bot(obs, mcts:MCTS, iteration = 10):
-    start_time = time.time()
-
     move = mcts.search(iteration, obs.board)
-    
-    times.append(time.time() - start_time)
     return move
-
-def add_snapshot():
-    #TODO
-    pass
-
-
-
 
 # RL
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -274,7 +292,7 @@ value_network.apply(init_weights_kaiming)
 mcts = MCTS(value_network)
 buffer = []
 buffer_threshold = 4096
-model_save_interval = 1000
+save_interval = 1000
 
 # Parameters
 total_episodes = 200000 
@@ -282,22 +300,12 @@ iteration = 10
 epochs = 15
 learning_rate = 0.2
 
-# Snapshot
-snapshots = []
-snapshot_index = 0
-snapshot_window = 4
-snapshot_replace_interval = 1000
-
 # Logs
-game_history = [0, 0, 0] 
-times = []
+game_history = [0, 0, 0]
 
-print(f"Tensorflow {tf.__version__}")
-print(f"Current Dir: {os.getcwd()}")
-if torch.cuda.is_available():
-    print("GPU is available!")
-else:
-    print("GPU is not available.")
+snapshotManager = SnapshotManager(window=5, add_interval=100, replace_interval=500)
+snapshotManager.addSnapshot(value_network)
+mcts_opponent = MCTS(snapshotManager.select(), is_opponent=True)
 
 env = make("chess", debug=True)
 for episode in range(1, total_episodes+1):
@@ -313,13 +321,9 @@ for episode in range(1, total_episodes+1):
         learning_rate = 0.002
 
     env.configuration["seed"] = random.randint(0, 10000)
-    result = env.run([lambda obs: chess_bot(obs, mcts, iteration), lambda obs: chess_bot(obs, snapshots[snapshot_index], iteration)])
-
-    avg_time = sum(times) / len(times)
-    times.clear()
+    result = env.run([lambda obs: chess_bot(obs, mcts, iteration), lambda obs: chess_bot(obs, mcts_opponent, iteration)])
 
     # Log
-    print(f"Avg step time: {avg_time:.2f}")
     print("Agent exit status/reward/time left: ")
     for agent in result[-1]:
         print("\t", agent.status, "/", agent.reward, "/", agent.observation.remainingOverageTime)
@@ -341,22 +345,20 @@ for episode in range(1, total_episodes+1):
     finalize_buffer(value_network, reward)
     buffer.extend(value_network.buffer) 
     value_network.buffer.clear()
+    print(f"buffer size: {len(buffer)}/{buffer_threshold}")
 
     if len(buffer) >= buffer_threshold:
         print(f"\nTraining on buffer at Episode {episode}")
         train_value_network(value_network, buffer, learning_rate, epochs)
         buffer.clear()
         env.render(mode='ipython', width=600, height=600)
-    if episode > 0 and episode % model_save_interval == 0: 
+
+    if episode % snapshotManager.add_interval == 0:
+        snapshotManager.addSnapshot(value_network)
+
+    if episode % snapshotManager.replace_interval == 0:
+        mcts_opponent.value_network = snapshotManager.select()
+
+    if episode % save_interval == 0:
         save_model(value_network, path=f"models/value_network_episode_{episode}.pth", episode=episode)
         apply_quantization(value_network, path=f"models/q_value_network_episode_{episode}.pth", episode=episode)
-    """
-       if episode > 0 and episode % snapshot_replace_interval == 0:
-        new_snapshot = ValueNetwork()
-        new_snapshot.load_state_dict(value_network.state_dict())
-        if(len(snapshots) < snapshot_window):
-            snapshots.append(value_network)
-        else:
-            snapshots[snapshot_index] = value_network
-        snapshot_index = (snapshot_index + 1) % min(len(snapshots), snapshot_window)     
-    """
