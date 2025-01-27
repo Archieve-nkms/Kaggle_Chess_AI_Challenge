@@ -1,0 +1,23 @@
+{
+    "configurations": [
+      {
+        "name": "Win32",
+        "includePath": [
+          "${workspaceFolder}/**",                  // 프로젝트 폴더의 모든 서브폴더
+          "C:/Dev/Languages/mingw64/include",    // MinGW 헤더 파일 경로 (Windows)
+          "C:/Dev/Languages/mingw64/lib/gcc/x86_64-w64-mingw32/8.1.0/include", // GCC 헤더
+          "C:/Dev/Languages/mingw64/x86_64-w64-mingw32/include"                // MinGW 표준 헤더
+        ],
+        "defines": [
+            "_DEBUG",
+            "UNICODE",
+            "_UNICODE"
+        ],
+        "compilerPath": "C:/Dev/Languages/mingw64/bin/g++.exe", // 컴파일러 경로
+        "cStandard": "c17",
+        "cppStandard": "c++17",
+        "intelliSenseMode": "windows-gcc-x64"
+      }
+    ],
+    "version": 4
+  }
