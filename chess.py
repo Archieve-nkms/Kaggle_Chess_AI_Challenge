@@ -1,14 +1,13 @@
 import random
 import os.path
 
-from agents import test_agent_3
 from kaggle_environments import make
 
 print(os.path.dirname( os.path.dirname( os.path.abspath(__file__) ) ))
 
 env = make("chess", debug=True)
 env.configuration["seed"] = random.randint(0,10000)
-result = env.run([lambda obs: test_agent_3.chess_bot(obs), "agents/agent_1.py"])
+result = env.run(["agents/nuee_ab/main.py", "agents/nuee_ab/main.py"])
 
 print("Agent exit status/reward/time left: ")
 for agent in result[-1]:
