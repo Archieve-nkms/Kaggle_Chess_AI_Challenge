@@ -1,56 +1,20 @@
 #include <iostream>
 #include <string>
 #include <vector>
-#include <algorithm>
 #include <sstream>
 #include <random>
+#include "board.h"
+#include "fen.h"
+#include "move.h"
+#include "genMove.h"
 
 using namespace std;
-
-/*
-py와 통신
-
-send: cout << << endl;
-receive: getline(cin, var);
-*/
-
-// TODO:
-// 1. Alpha-beta pruning
-// 2. NNUE
 
 constexpr float FLOAT_MIN = -numeric_limits<float>::max();
 constexpr float FLOAT_MAX = numeric_limits<float>::max();
 constexpr int DEFAULT_DEPTH = 2;
 
-vector<string> split(string str, char delimiter = '?')
-{
-    vector<string> result;
-    stringstream ss(str);
-    string t;
-
-    while (getline(ss, t, delimiter))
-    {
-        result.push_back(t);
-    }
-    return result;
-}
-
-pair<string, vector<string>> request(string command, string fen = "", string move = "")
-{
-    string str;
-
-    if(command == "apply_move")
-    {
-        cout << "apply_move" << "?" << fen << "?" << move << endl;
-        getline(cin, str);
-        vector<string> received = split(str);
-        return { received[1], split(received[2], ' ') };
-    }
-
-    return {};
-}
-
-float evaluate(string fen)
+float evaluate(Board board)
 {
     random_device rd; // 시드 값을 위한 random_device
     mt19937 gen(rd()); // Mersenne Twister 엔진
@@ -60,57 +24,58 @@ float evaluate(string fen)
     return dis(gen);
 }
 
-float minimax(string fen, vector<string> possible_moves, int depth, bool maximizing, float alpha = FLOAT_MIN, float beta = FLOAT_MAX)
+float minimax(Board board, int depth, bool maximizing, float alpha = FLOAT_MIN, float beta = FLOAT_MAX)
 {
-    if(depth == 0 || possible_moves.size() == 0)
-        return evaluate(fen); 
+    vector<Move> legal_moves = getLegalMoves(board);
+
+    if(depth == 0 || legal_moves.size() == 0)
+        return evaluate(board); 
 
     if(maximizing)
     {
-        float maxEval = FLOAT_MIN;
-        for (const auto& move : possible_moves)
+        float max_eval = FLOAT_MIN;
+        for(auto& move : legal_moves)
         {
-            auto received = request("apply_move", fen, move);
-            float eval = minimax(received.first, received.second, depth - 1, false, alpha, beta);
-            maxEval= max(maxEval, eval);
+            float eval = minimax(applyMove(board, move), depth - 1, false, alpha, beta);
+
+            max_eval= max(max_eval, eval);
             alpha = max(alpha, eval);
             if(beta <= alpha)
                 break;
         }
-
-        return maxEval;
+        return max_eval;
     }
     else
     {
-        float minEval = FLOAT_MAX;
-        for (const auto& move : possible_moves)
+        float min_eval = FLOAT_MAX;
+        for(auto& move : legal_moves)
         {
-            auto received = request("apply_move", fen, move);
-            float eval = minimax(received.first, received.second, depth - 1, false, alpha, beta);
-            minEval = min(minEval, eval);
-            beta = min(beta, eval);
+            float eval = minimax(applyMove(board, move), depth - 1, true, alpha, beta);
+
+            min_eval= min(min_eval, eval);
+            alpha = min(alpha, eval);
             if(beta <= alpha)
                 break;
         }
 
-        return minEval;
+        return min_eval;
     }
     
 }
 
-string getBestMove(string fen, vector<string> possible_moves)
+string getBestMove(Board board)
 {
-    float bestEval = FLOAT_MIN;
-    string best_move = "";
-    for(const auto& move : possible_moves)
+    float best_eval = FLOAT_MIN;
+    string best_move;
+    vector<Move> legal_moves = getLegalMoves(board);
+
+    for(auto& move : legal_moves)
     {
-        auto received = request("apply_move", fen, move);
-        float value = minimax(received.first, received.second, DEFAULT_DEPTH - 1, true);
-        
-        if(value > bestEval)
+        float value = minimax(applyMove(board, move), DEFAULT_DEPTH - 1, true);
+        if(value > best_eval)
         {
-            bestEval = value;
-            best_move = move;
+            best_eval = value;
+            best_move = convertMoveToUci(move);
         }
     }
 
@@ -119,12 +84,16 @@ string getBestMove(string fen, vector<string> possible_moves)
 
 int main() 
 {
-    while(1)
+    initMoves();
+    while(true)
     {
-        string str;
-        getline(cin, str);
-        vector<string> state = split(str); // fen?moves
-        string best_move = getBestMove(state[0], split(state[1], ' '));
+        string fen;
+        getline(cin, fen);
+
+        Board board;
+        convertFenToBoard(&board, fen.c_str());
+
+        string best_move = getBestMove(board);
         cout << "output?" << best_move << endl;
     }
     return 0;
