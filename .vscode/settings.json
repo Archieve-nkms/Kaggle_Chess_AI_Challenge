@@ -63,6 +63,12 @@
         "thread": "cpp",
         "typeindex": "cpp",
         "typeinfo": "cpp",
-        "variant": "cpp"
+        "variant": "cpp",
+        "any": "cpp",
+        "cfenv": "cpp",
+        "csignal": "cpp",
+        "regex": "cpp",
+        "future": "cpp",
+        "csetjmp": "cpp"
     }
 }

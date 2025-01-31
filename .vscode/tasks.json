@@ -3,14 +3,19 @@
 	"tasks": [
 		{
 			"type": "cppbuild",
-			"label": "C/C++: g++.exe build active file",
+			"label": "C/C++: build",
 			"command": "C:/Dev/Languages/mingw64/bin/g++.exe",
 			"args": [
-				"-fdiagnostics-color=always",
-				"-g",
-				"${file}",
-				"-o",
-				"${fileDirname}\\${fileBasenameNoExtension}.out"
+			    "-fdiagnostics-color=always", // GCC의 컴파일러 메시지(에러, 경고)에 색상을 항상 적용
+			    "-g", // GDB와 같은 디버거가 소스 코드 라인과 실행 파일을 연결할 수 있도록 심볼 정보 삽입
+			    "-Os", // 불필요한 코드 제거 및 압축
+				"-mconsole", // 콘솔 모드 강제
+			    "${fileDirname}\\main.cpp",
+			    "${fileDirname}\\ChessEngine\\*.cpp",
+			    "-I", // 기본적으로 컴파일러는 #include 파일을 현재 디렉토리와 표준 라이브러리 경로에서만 찾음 → -I 옵션으로 추가 경로 지정 가능
+			    "${fileDirname}\\ChessEngine",
+			    "-o", // -o 옵션은 컴파일 후 생성할 실행 파일의 이름을 지정
+			    "${fileDirname}\\${fileBasenameNoExtension}.exe",
 			],
 			"options": {
 				"cwd": "C:/Dev/Languages/mingw64/bin"
