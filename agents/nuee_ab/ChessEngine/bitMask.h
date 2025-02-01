@@ -33,17 +33,3 @@ inline uint64_t getSquareBitmask(int rank, int file)
 {
     return 1ULL << ((rank - 1) * 8 + (8 - file));
 }
-
-inline uint64_t getRookBitmask(int rank, int file)
-{
-    uint64_t bitmask = 0ULL;
-    int square = (rank - 1) * 8 + (8 - file);
-
-    uint64_t fileMask = (FILE_A >> (file - 1));
-
-    uint64_t rankMask = (RANK_1 << ((rank - 1) * 8));
-
-    bitmask = (fileMask | rankMask) & ~(1ULL << square);
-
-    return bitmask;
-}

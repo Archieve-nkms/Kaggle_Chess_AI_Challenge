@@ -1,7 +1,6 @@
 #include <iostream>
 #include <string>
 #include <vector>
-#include <sstream>
 #include <random>
 #include "board.h"
 #include "fen.h"
@@ -13,6 +12,7 @@ using namespace std;
 constexpr float FLOAT_MIN = -numeric_limits<float>::max();
 constexpr float FLOAT_MAX = numeric_limits<float>::max();
 constexpr int DEFAULT_DEPTH = 2;
+
 
 float evaluate(Board board)
 {
@@ -94,7 +94,8 @@ int main()
         convertFenToBoard(&board, fen.c_str());
 
         string best_move = getBestMove(board);
-        cout << "output?" << best_move << endl;
+
+        cout << best_move << endl;
     }
     return 0;
 }

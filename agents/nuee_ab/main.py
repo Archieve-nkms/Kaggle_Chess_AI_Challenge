@@ -1,5 +1,4 @@
 from subprocess import Popen, PIPE
-from Chessnut import Game
 
 class CppBridge:
     def __init__(self, path:str):
@@ -21,13 +20,9 @@ class CppBridge:
 
     def loop(self):
         while(True):
-            received_request = self.receive()
-            parameters = received_request.split("?")
-            cmd:str = parameters[0]
-            if cmd == "output":
-                return parameters[1]
+            return self.receive();
 
-cpp_executable_path = "agents/nuee_ab/main.exe"
+cpp_executable_path = "agents/nuee_ab/main.out"
 cpp_bridge = CppBridge(cpp_executable_path)
 
 def chess_bot(obs):
@@ -35,7 +30,6 @@ def chess_bot(obs):
     if(cpp_bridge == None):
         cpp_bridge = CppBridge(cpp_executable_path) 
     
-    cpp_bridge.send(f"{obs}")
-
+    cpp_bridge.send(f"{obs.board}")
     best_move = cpp_bridge.loop()
     return best_move

@@ -1,6 +1,7 @@
 #pragma once
 #include "board.h"
 #include "string"
+#include "bitMask.h"
 
 enum Piece
 {
