@@ -11,7 +11,7 @@ using namespace std;
 
 constexpr float FLOAT_MIN = -numeric_limits<float>::max();
 constexpr float FLOAT_MAX = numeric_limits<float>::max();
-constexpr int DEFAULT_DEPTH = 2;
+constexpr int DEFAULT_DEPTH = 4;
 
 
 float evaluate(Board board)
@@ -53,7 +53,7 @@ float minimax(Board board, int depth, bool maximizing, float alpha = FLOAT_MIN, 
             float eval = minimax(applyMove(board, move), depth - 1, true, alpha, beta);
 
             min_eval= min(min_eval, eval);
-            alpha = min(alpha, eval);
+            beta = min(alpha, eval);
             if(beta <= alpha)
                 break;
         }
