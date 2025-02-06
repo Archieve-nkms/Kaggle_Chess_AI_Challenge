@@ -1,5 +1,4 @@
 #include "genMove.h"
-#include <iostream>
 
 uint64_t KNIGHT_MOVES[64];
 uint64_t BISHOP_MOVES[64];

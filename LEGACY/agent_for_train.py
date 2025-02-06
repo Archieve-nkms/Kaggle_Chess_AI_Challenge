@@ -13,23 +13,24 @@ class ValueNetwork(nn.Module):
     def __init__(self):
         super(ValueNetwork, self).__init__()
         self.buffer = []
-        self.conv1 = nn.Conv2d(19, 16, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(16, 16, kernel_size=3, padding=1)
-        self.fc1 = nn.Linear(16 * 8 * 8, 16)
-        self.fc2 = nn.Linear(16, 1)
-        self.dropout = nn.Dropout(0.3)
+        
+        self.conv1 = nn.Conv2d(19, 256, kernel_size=3, padding=1)
+        self.bn = nn.BatchNorm2d(256)
+        self.conv2 = nn.Conv2d(256, 1, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(1)
+        self.fc1 = nn.Linear(8 * 8, 256)
+        self.fc2 = nn.Linear(256, 1)
 
     def forward(self, x):
         x = x.to(device)
-        x = f.relu(self.conv1(x))
-        x = f.relu(self.conv2(x))
+        x = f.relu(self.bn(self.conv1(x)))
+        x = f.relu(self.bn2(self.conv2(x)))
         x = x.view(x.size(0), -1)  # Flatten
         x = f.relu(self.fc1(x))
-        x = self.dropout(x)
         return torch.tanh(self.fc2(x))
     
-    def save_to_buffer(self, input, score):
-        self.buffer.append((input, score))
+    def save_to_buffer(self, board):
+        self.buffer.append(board)
 
 class Node:
     def __init__(self, fen, move, parent=None):
@@ -89,6 +90,8 @@ class MCTS:
         with torch.no_grad():
             input_tensor = Create_input_tensor(Game(fen))
             value = self.value_network.forward(input_tensor).item()
+            if self.is_opponent:
+                value = 1.0 - value
         return value
         
     def _backpropagate(self, node, result):
@@ -117,19 +120,16 @@ class MCTS:
 
         if(not self.is_opponent):
             input_tensor = Create_input_tensor(Game(best_node.fen))
-            with torch.no_grad():
-                score = self.value_network.forward(input_tensor).item()
-            self.value_network.save_to_buffer(input_tensor, score)
+            self.value_network.save_to_buffer(input_tensor)
 
         return best_node.move
 
 class SnapshotManager:
-    def __init__(self, window: int = 4, add_interval: int = 100, replace_interval: int = 500):
+    def __init__(self, window: int = 4, replace_interval: int = 5):
         self.window = window
         self.snapshots = []
         self.oldest_index = -1
         self.replace_interval = replace_interval
-        self.add_interval = add_interval
 
     def addSnapshot(self, value_network: ValueNetwork):
         if len(self.snapshots) < self.window:
@@ -193,15 +193,15 @@ def bitboards_to_tensor(bitboards):
 def finalize_buffer(value_network, game_result):
     updated_buffer = []
 
-    for state, y_hat in value_network.buffer:
-        updated_buffer.append((state, y_hat, float(game_result)))  # y 값 추가
+    for state in value_network.buffer:
+        updated_buffer.append((state, float(game_result)))  # y 값 추가
     value_network.buffer = updated_buffer
 
 def train_value_network(value_network:ValueNetwork, buffer, learning_rate, epochs=25, batch_size=32):
     value_network.train() 
 
-    optimizer = optim.Adam(value_network.parameters(), lr=learning_rate)
-    loss_fn = nn.HuberLoss()  # 손실 함수
+    optimizer = optim.Adam(value_network.parameters(), lr=learning_rate, weight_decay=1e-4)
+    loss_fn = nn.MSELoss()  # 손실 함수
 
     for epoch in range(epochs):
         random.shuffle(buffer)
@@ -216,8 +216,8 @@ def train_value_network(value_network:ValueNetwork, buffer, learning_rate, epoch
                 inputs = inputs.squeeze(1)  # [batch_size, 19, 8, 8]
 
             # 라벨 준비
-            targets = torch.tensor([item[2] for item in batch]).to(device) 
-
+            targets = torch.tensor([item[1] for item in batch]).to(device) 
+            
             # 학습 단계
             optimizer.zero_grad()
             outputs = value_network(inputs)
@@ -233,7 +233,7 @@ def train_value_network(value_network:ValueNetwork, buffer, learning_rate, epoch
         avg_loss = epoch_loss / num_batches
         print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}")
 
-        value_network.eval()
+    value_network.eval()
 
 def save_model(value_network, path="value_network.pth", episode=0):
     torch.save({
@@ -264,6 +264,12 @@ def init_weights_kaiming(m):
         if m.bias is not None:
             nn.init.zeros_(m.bias)
 
+def init_weights_xavier(m):
+    if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
+        nn.init.xavier_uniform_(m.weight)
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
+
 def chess_bot(obs, mcts:MCTS, iteration = 15):
     move = mcts.search(iteration, obs.board)
     return move
@@ -271,36 +277,29 @@ def chess_bot(obs, mcts:MCTS, iteration = 15):
 # RL
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 value_network = ValueNetwork().to(device)
-value_network.apply(init_weights_kaiming)
-mcts = MCTS(value_network, exploration_weight=2)
+value_network.apply(init_weights_xavier)
+mcts = MCTS(value_network, exploration_weight=1.41421356237)
 buffer = []
-buffer_threshold = 4096
-save_interval = 5
+buffer_threshold = 40960
+minibatch_size = 256
 
-# Parameters
 total_episodes = 200000
-iteration = 15
+iteration = 30
 epochs = 10
-learning_rate = 0.001
+learning_rate = 0.008
 
 # Logs
 game_history = [0, 0, 0]
 
-snapshotManager = SnapshotManager(window=5, add_interval=100, replace_interval=500)
+snapshot_n = 0
+
+snapshotManager = SnapshotManager(window=5)
 snapshotManager.addSnapshot(value_network)
-mcts_opponent = MCTS(snapshotManager.select(), is_opponent=True, exploration_weight=2)
+mcts_opponent = MCTS(snapshotManager.select(), is_opponent=True, exploration_weight=1.41421356237)
 
 env = make("chess", debug=True)
 for episode in range(1, total_episodes+1):
     print(f"\nEpisode: {episode}")
-    progress = episode / total_episodes
-    if 0.2 < progress and progress <= 0.8:
-        iteration = 30
-        epochs = 30
-        mcts.exploration_weight = mcts_opponent.exploration_weight = 1.41421356237
-    elif 0.8 < progress: 
-        iteration = 50
-        epochs = 20
 
     env.configuration["seed"] = random.randint(0, 10000)
     result = env.run([lambda obs: chess_bot(obs, mcts, iteration), lambda obs: chess_bot(obs, mcts_opponent, iteration)])
@@ -328,23 +327,23 @@ for episode in range(1, total_episodes+1):
     buffer.extend(value_network.buffer) 
     value_network.buffer.clear()
     print(f"buffer size: {len(buffer)}/{buffer_threshold}")
-
+    
     if len(buffer) >= buffer_threshold:
         print(f"\nTraining on buffer at Episode {episode}")
-        train_value_network(value_network, buffer, learning_rate, epochs)
+        train_value_network(value_network, buffer, learning_rate, epochs, minibatch_size)
         buffer.clear()
         game_history = [0, 0, 0]
         env.render(mode='ipython', width=600, height=600)
 
-    if episode % snapshotManager.add_interval == 0:
+        save_model(value_network, path=f"models/value_network_episode_{episode}.pth", episode=episode)
+        quantized_model = apply_dynamic_quantization(value_network)
+        torch.save(quantized_model.state_dict(), f"models/quantized/q_value_network_episode_{episode}.pth")
+
+        snapshot_n += 1
         snapshotManager.addSnapshot(value_network)
         print("Snapshot generated")
 
-    if episode % snapshotManager.replace_interval == 0:
-        mcts_opponent.value_network = snapshotManager.select()
-        print(f"Snapshot selected")
-
-    if episode % save_interval == 0:
-        save_model(value_network, path=f"models/value_network_episode_{episode}.pth", episode=episode)
-        quantized_model = apply_dynamic_quantization(value_network)
-        torch.save(quantized_model.state_dict(), f"models/q_value_network_episode_{episode}.pth")
+        if snapshot_n % snapshotManager.replace_interval == 0:
+            snapshot_n = 0
+            mcts_opponent.value_network = snapshotManager.select()
+            print(f"Snapshot selected")
