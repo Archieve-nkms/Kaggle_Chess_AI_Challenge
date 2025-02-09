@@ -9,6 +9,21 @@ from Chessnut import Game
 from kaggle_environments import make
 from math import sqrt, log
 
+class ResidualBlock(nn.Module):
+    def __init__(self, channels):
+        super(ResidualBlock, self).__init__()
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(channels)
+
+    def forward(self, x):
+        residual = x
+        out = f.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out += residual
+        return f.relu(out)
+    
 class ValueNetwork(nn.Module):
     def __init__(self):
         super(ValueNetwork, self).__init__()
@@ -16,17 +31,22 @@ class ValueNetwork(nn.Module):
         
         self.conv1 = nn.Conv2d(19, 256, kernel_size=3, padding=1)
         self.bn = nn.BatchNorm2d(256)
+        self.res_block = ResidualBlock(256)
         self.conv2 = nn.Conv2d(256, 1, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(1)
+
         self.fc1 = nn.Linear(8 * 8, 256)
         self.fc2 = nn.Linear(256, 1)
+        self.dropout = nn.Dropout(0.2)
 
     def forward(self, x):
         x = x.to(device)
         x = f.relu(self.bn(self.conv1(x)))
+        x = self.res_block(x)
         x = f.relu(self.bn2(self.conv2(x)))
         x = x.view(x.size(0), -1)  # Flatten
         x = f.relu(self.fc1(x))
+        x = self.dropout(x)
         return torch.tanh(self.fc2(x))
     
     def save_to_buffer(self, board):
@@ -278,9 +298,10 @@ def chess_bot(obs, mcts:MCTS, iteration = 15):
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 value_network = ValueNetwork().to(device)
 value_network.apply(init_weights_xavier)
-mcts = MCTS(value_network, exploration_weight=1.41421356237)
+value_network.load_state_dict(torch.load("models/value_network_episode_1562.pth"), strict=False)
+mcts = MCTS(value_network, exploration_weight=1.41)
 buffer = []
-buffer_threshold = 40960
+buffer_threshold = 4096
 minibatch_size = 256
 
 total_episodes = 200000
@@ -293,12 +314,12 @@ game_history = [0, 0, 0]
 
 snapshot_n = 0
 
-snapshotManager = SnapshotManager(window=5)
+snapshotManager = SnapshotManager(window=4)
 snapshotManager.addSnapshot(value_network)
-mcts_opponent = MCTS(snapshotManager.select(), is_opponent=True, exploration_weight=1.41421356237)
+mcts_opponent = MCTS(snapshotManager.select(), is_opponent=True, exploration_weight=1.41)
 
 env = make("chess", debug=True)
-for episode in range(1, total_episodes+1):
+for episode in range(1600, total_episodes+1):
     print(f"\nEpisode: {episode}")
 
     env.configuration["seed"] = random.randint(0, 10000)
@@ -312,7 +333,7 @@ for episode in range(1, total_episodes+1):
     # Reward
     reward = 0
     if result[-1][1].reward == None or result[-1][1].reward == 0.5:
-        reward = reward_2 = 0
+        reward = 0
         game_history[1] += 1
     elif result[-1][1].reward == 0:
         reward = 1
@@ -333,17 +354,27 @@ for episode in range(1, total_episodes+1):
         train_value_network(value_network, buffer, learning_rate, epochs, minibatch_size)
         buffer.clear()
         game_history = [0, 0, 0]
-        env.render(mode='ipython', width=600, height=600)
-
-        save_model(value_network, path=f"models/value_network_episode_{episode}.pth", episode=episode)
-        quantized_model = apply_dynamic_quantization(value_network)
-        torch.save(quantized_model.state_dict(), f"models/quantized/q_value_network_episode_{episode}.pth")
 
         snapshot_n += 1
         snapshotManager.addSnapshot(value_network)
         print("Snapshot generated")
 
-        if snapshot_n % snapshotManager.replace_interval == 0:
+        win_rate = game_history[0] / sum(game_history) if sum(game_history) > 0 else 0
+        if win_rate >= 0.55:
             snapshot_n = 0
             mcts_opponent.value_network = snapshotManager.select()
-            print(f"Snapshot selected")
+            print(f"Adaptive Snapshot Replacement: Win rate {win_rate:.2f}")
+            save_model(value_network, path=f"models/value_network_episode_{episode}.pth", episode=episode)
+            quantized_model = apply_dynamic_quantization(value_network)
+            torch.save(quantized_model.state_dict(), f"models/quantized/q_value_network_episode_{episode}.pth")
+
+        # if snapshot_n % snapshotManager.replace_interval == 0:
+        #     snapshot_n = 0
+        #     mcts_opponent.value_network = snapshotManager.select()
+        #     print(f"Snapshot selected")
+
+        #     save_model(value_network, path=f"models/value_network_episode_{episode}.pth", episode=episode)
+        #     quantized_model = apply_dynamic_quantization(value_network)
+        #     torch.save(quantized_model.state_dict(), f"models/quantized/q_value_network_episode_{episode}.pth")
+
+        env.render(mode='ipython', width=600, height=600)
