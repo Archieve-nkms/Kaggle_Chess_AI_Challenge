@@ -88,10 +88,9 @@ class Node:
         self.wins += result
 
 class MCTS:
-    def __init__(self, value_network, is_opponent = False, exploration_weight = 2):
+    def __init__(self, value_network, exploration_weight = 2):
         self.root = None
         self.value_network = value_network
-        self.is_opponent = is_opponent
         self.exploration_weight = exploration_weight
 
     def _select(self, node):
@@ -108,8 +107,6 @@ class MCTS:
         with torch.no_grad():
             input_tensor = Create_input_tensor(Game(fen))
             value = self.value_network.forward(input_tensor).item()
-            if self.is_opponent:
-                value = -value
         return value
         
     def _backpropagate(self, node, result):
@@ -136,35 +133,10 @@ class MCTS:
 
         best_node = self.root.get_best_child(exploration_weight=0)
 
-        if(not self.is_opponent):
-            input_tensor = Create_input_tensor(Game(best_node.fen))
-            self.value_network.save_to_buffer(input_tensor)
+        input_tensor = Create_input_tensor(Game(best_node.fen))
+        self.value_network.save_to_buffer(input_tensor)
 
         return best_node.move
-
-class SnapshotManager:
-    def __init__(self, window: int = 4, replace_interval: int = 5):
-        self.window = window
-        self.snapshots = []
-        self.oldest_index = -1
-        self.replace_interval = replace_interval
-
-    def addSnapshot(self, value_network: ValueNetwork):
-        if len(self.snapshots) < self.window:
-            new_snapshot = type(value_network)().to(device)
-            new_snapshot.load_state_dict(value_network.state_dict())
-            self.snapshots.append(new_snapshot)
-        else:
-            self.snapshots[self.oldest_index].load_state_dict(value_network.state_dict())
-        self.oldest_index = (self.oldest_index + 1) % self.window
-
-    def select(self) -> ValueNetwork:
-        if not self.snapshots:
-            raise ValueError("No snapshots available for selection.")
-
-        weights = [i + 1 for i in range(len(self.snapshots))]
-        selected_index = random.choices(range(len(self.snapshots)), weights=weights, k=1)[0]
-        return self.snapshots[selected_index]
 
 def Create_input_tensor(game: Game):
     bitboards = board_to_bitboards(game.board)
@@ -296,7 +268,7 @@ def chess_bot(obs, mcts:MCTS, iteration = 15):
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 value_network = ValueNetwork().to(device)
 value_network.apply(init_weights_xavier)
-value_network.load_state_dict(torch.load("models/value_network_episode_1562.pth"), strict=False)
+value_network.load_state_dict(torch.load("models/value_network_episode_1782.pth"), strict=False)
 mcts = MCTS(value_network, exploration_weight=1.41)
 buffer = []
 buffer_threshold = 4096
@@ -310,11 +282,10 @@ learning_rate = 0.008
 # Logs
 game_history = [0, 0, 0]
 
-snapshot_n = 0
-
-snapshotManager = SnapshotManager(window=1, replace_interval=1)
-snapshotManager.addSnapshot(value_network)
-mcts_opponent = MCTS(snapshotManager.select(), is_opponent=True, exploration_weight=1.41)
+value_network2 = ValueNetwork().to(device)
+value_network2.apply(init_weights_xavier)
+value_network2.load_state_dict(torch.load("models/value_network_episode_1782.pth"), strict=False)
+mcts_opponent = MCTS(value_network2, exploration_weight=1.41)
 
 env = make("chess", debug=True)
 for episode in range(1600, total_episodes+1):
@@ -345,6 +316,11 @@ for episode in range(1600, total_episodes+1):
     finalize_buffer(value_network, reward)
     buffer.extend(value_network.buffer) 
     value_network.buffer.clear()
+
+    finalize_buffer(value_network2, -reward)
+    buffer.extend(value_network2.buffer)
+    value_network2.buffer.clear()
+
     print(f"buffer size: {len(buffer)}/{buffer_threshold}")
     
     if len(buffer) >= buffer_threshold:
@@ -352,18 +328,11 @@ for episode in range(1600, total_episodes+1):
         train_value_network(value_network, buffer, learning_rate, epochs, minibatch_size)
         buffer.clear()
 
-        snapshot_n += 1
-        snapshotManager.addSnapshot(value_network)
-        print("Snapshot generated")
+        mcts_opponent.value_network.load_state_dict(value_network.state_dict())
 
-        if snapshot_n % snapshotManager.replace_interval == 0:
-            snapshot_n = 0
-            mcts_opponent.value_network = snapshotManager.select()
-            print(f"Snapshot selected")
-
-            save_model(value_network, path=f"models/value_network_episode_{episode}.pth", episode=episode)
-            quantized_model = apply_dynamic_quantization(value_network)
-            torch.save(quantized_model.state_dict(), f"models/quantized/q_value_network_episode_{episode}.pth")
+        save_model(value_network, path=f"models/value_network_episode_{episode}.pth", episode=episode)
+        quantized_model = apply_dynamic_quantization(value_network)
+        torch.save(quantized_model.state_dict(), f"models/quantized/q_value_network_episode_{episode}.pth")
 
         game_history = [0, 0, 0]
         env.render(mode='ipython', width=600, height=600)
